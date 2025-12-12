@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useState, useEffect, useRef } from 'react';
-import { Layout, Box, Image as ImageIcon, Wand2, Layers, Plus, Trash2, Download, History, Sparkles, Shirt, Move, Maximize, RotateCcw, Zap, Cpu, ArrowRight, Globe, Scan, Camera, Aperture, Repeat, SprayCan, Triangle, Package, Menu, X, Check, MousePointer2, Settings, FlaskConical, AlertTriangle, KeyRound } from 'lucide-react';
+import { Layout, Box, Image as ImageIcon, Wand2, Layers, Plus, Trash2, Download, History, Sparkles, Shirt, Move, Maximize, RotateCcw, RotateCw, Zap, Cpu, ArrowRight, Globe, Scan, Camera, Aperture, Repeat, SprayCan, Triangle, Package, Menu, X, Check, MousePointer2, Settings, FlaskConical, AlertTriangle, KeyRound, Undo, Redo, Copy } from 'lucide-react';
 import { Button } from './components/Button';
 import { FileUploader } from './components/FileUploader';
 import { generateMockup, generateAsset, generateRealtimeComposite, testModelConnection } from './services/geminiService';
-import { Asset, GeneratedMockup, AppView, LoadingState, PlacedLayer } from './types';
+import { Asset, GeneratedMockup, AppView, LoadingState, PlacedLayer, MockupOptions } from './types';
 import { useApiKey } from './hooks/useApiKey';
+import { useHistory } from './hooks/useHistory';
 import ApiKeyDialog from './components/ApiKeyDialog';
 
 // --- Intro Animation Component ---
@@ -404,9 +405,19 @@ export default function App() {
 
   // Form states for generation
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
-  const [placedLogos, setPlacedLogos] = useState<PlacedLayer[]>([]);
   const [prompt, setPrompt] = useState('');
   const [loading, setLoading] = useState<LoadingState>({ isGenerating: false, message: '' });
+
+  // History State
+  const logosHistory = useHistory<PlacedLayer[]>([]);
+  const placedLogos = logosHistory.state;
+
+  // Options State
+  const [mockupOptions, setMockupOptions] = useState<MockupOptions>({
+      count: 1,
+      creativity: 'standard',
+      varyAngles: false
+  });
 
   // Sync manual input with effective key for display in settings
   useEffect(() => {
@@ -483,12 +494,13 @@ export default function App() {
       scale: 1,
       rotation: 0
     };
-    setPlacedLogos(prev => [...prev, newLayer]);
+    // Push new state to history
+    logosHistory.set([...placedLogos, newLayer]);
   };
 
   const removeLogoFromCanvas = (uid: string, e?: React.MouseEvent | React.TouchEvent) => {
     e?.stopPropagation();
-    setPlacedLogos(prev => prev.filter(l => l.uid !== uid));
+    logosHistory.set(placedLogos.filter(l => l.uid !== uid));
   };
 
   const handleStart = (clientX: number, clientY: number, layer: PlacedLayer) => {
@@ -499,6 +511,8 @@ export default function App() {
       initX: layer.x,
       initY: layer.y
     });
+    // Push current state to history BEFORE starting drag interaction (duplicates top state for safe return)
+    logosHistory.set(placedLogos); 
   };
 
   const handleMouseDown = (e: React.MouseEvent, layer: PlacedLayer) => {
@@ -515,13 +529,20 @@ export default function App() {
 
   const handleWheel = (e: React.WheelEvent, layerId: string) => {
      e.stopPropagation();
-     // Simple scale on scroll
+     // Simple scale on scroll - For simplicity, this is NOT undoable per-tick, 
+     // but since we don't know when scroll ends easily, let's just update current tip.
+     // To make it undoable, user would need to click "Undo" which would revert the entire scroll session if we managed it, 
+     // but here we just overwrite the current state tip.
+     // Ideally we'd use a timer to detect scroll end and push history then.
      const delta = e.deltaY > 0 ? -0.1 : 0.1;
-     setPlacedLogos(prev => prev.map(l => {
+     
+     const newLogos = placedLogos.map(l => {
         if (l.uid !== layerId) return l;
         const newScale = Math.max(0.2, Math.min(3.0, l.scale + delta));
         return { ...l, scale: newScale };
-     }));
+     });
+     // Overwrite current state to avoid creating 100 history entries
+     logosHistory.set(newLogos, true);
   };
 
   // Global mouse/touch move for dragging
@@ -537,14 +558,16 @@ export default function App() {
       const deltaXPercent = (deltaX / rect.width) * 100;
       const deltaYPercent = (deltaY / rect.height) * 100;
 
-      setPlacedLogos(prev => prev.map(l => {
+      const newLogos = placedLogos.map(l => {
         if (l.uid !== draggedItem.uid) return l;
         return {
           ...l,
           x: Math.max(0, Math.min(100, draggedItem.initX + deltaXPercent)),
           y: Math.max(0, Math.min(100, draggedItem.initY + deltaYPercent))
         };
-      }));
+      });
+      // Overwrite current state (visual update during drag)
+      logosHistory.set(newLogos, true);
     };
 
     const onMouseMove = (e: MouseEvent) => {
@@ -579,25 +602,19 @@ export default function App() {
       window.removeEventListener('touchmove', onTouchMove);
       window.removeEventListener('touchend', onTouchEnd);
     };
-  }, [draggedItem]);
+  }, [draggedItem, placedLogos, logosHistory]);
 
 
   const handleGenerate = async () => {
-    // We don't return early for empty selections here so we can give better user feedback
-    if (!selectedProductId && placedLogos.length === 0) {
-        // Although button is disabled, safety check
-        return;
-    }
+    if (!selectedProductId && placedLogos.length === 0) return;
     
     const product = assets.find(a => a.id === selectedProductId);
     if (!product) {
         alert("Selected product not found. Please select a product.");
-        // Deselect the invalid ID so the UI updates
         setSelectedProductId(null);
         return;
     }
 
-    // Prepare all layers
     const layers = placedLogos.map(layer => {
         const asset = assets.find(a => a.id === layer.assetId);
         return asset ? { asset, placement: layer } : null;
@@ -608,7 +625,6 @@ export default function App() {
          return;
     }
 
-    // Check API Key before proceeding
     if (!hasKey) {
       setShowApiKeyDialog(true);
       return;
@@ -616,20 +632,21 @@ export default function App() {
 
     const currentPrompt = prompt;
 
-    setLoading({ isGenerating: true, message: 'Analyzing composite geometry...' });
+    setLoading({ isGenerating: true, message: `Analyzing composite geometry...` });
     try {
-      const resultImage = await generateMockup(product, layers, currentPrompt, modelId, apiKey);
+      // Pass options to service
+      const resultImages = await generateMockup(product, layers, currentPrompt, modelId, apiKey, mockupOptions);
       
-      const newMockup: GeneratedMockup = {
+      const newMockups: GeneratedMockup[] = resultImages.map(img => ({
         id: Math.random().toString(36).substring(7),
-        imageUrl: resultImage,
+        imageUrl: img,
         prompt: currentPrompt,
         createdAt: Date.now(),
         layers: placedLogos, // Save the layout
         productId: selectedProductId
-      };
+      }));
       
-      setGeneratedMockups(prev => [newMockup, ...prev]);
+      setGeneratedMockups(prev => [...newMockups, ...prev]);
       setView('gallery');
     } catch (e: any) {
       console.error(e);
@@ -926,9 +943,18 @@ export default function App() {
                    <div>
                       <div className="flex items-center justify-between mb-4">
                         <h3 className="text-sm font-bold text-zinc-300 uppercase tracking-wider font-mono">2. Add Logos</h3>
-                        {placedLogos.length > 0 && (
-                            <span className="text-xs text-white bg-zinc-800 px-2 py-0.5 rounded font-mono">{placedLogos.length} on canvas</span>
-                        )}
+                        <div className="flex gap-2">
+                            {/* Undo/Redo Controls */}
+                            <button onClick={logosHistory.undo} disabled={!logosHistory.canUndo} className="p-1 hover:bg-zinc-800 rounded disabled:opacity-30">
+                                <Undo size={14} />
+                            </button>
+                            <button onClick={logosHistory.redo} disabled={!logosHistory.canRedo} className="p-1 hover:bg-zinc-800 rounded disabled:opacity-30">
+                                <Redo size={14} />
+                            </button>
+                            {placedLogos.length > 0 && (
+                                <span className="text-xs text-white bg-zinc-800 px-2 py-0.5 rounded font-mono ml-2">{placedLogos.length}</span>
+                            )}
+                        </div>
                       </div>
                       <p className="text-xs text-zinc-500 mb-2">Click to add. Drag on canvas to move. Scroll to resize.</p>
                       <div className="grid grid-cols-3 gap-2">
@@ -939,7 +965,6 @@ export default function App() {
                                className={`relative aspect-square rounded-lg border cursor-pointer p-1 transition-all border-zinc-800 hover:border-zinc-600 bg-zinc-950`}
                             >
                                <img src={a.data} className="w-full h-full object-contain" alt={a.name} />
-                               {/* Count badge */}
                                {placedLogos.filter(l => l.assetId === a.id).length > 0 && (
                                    <div className="absolute -top-2 -right-2 w-5 h-5 bg-white text-black rounded-full flex items-center justify-center text-[10px] font-bold border border-zinc-900">
                                        {placedLogos.filter(l => l.assetId === a.id).length}
@@ -951,8 +976,58 @@ export default function App() {
                       </div>
                    </div>
 
+                   {/* New Output Options Section */}
+                   <div className="border-t border-zinc-800 pt-4">
+                      <h3 className="text-sm font-bold text-zinc-300 uppercase tracking-wider mb-4 font-mono">3. Output Settings</h3>
+                      
+                      <div className="space-y-4">
+                          <div className="flex items-center justify-between">
+                              <span className="text-xs text-zinc-400">Image Count: <span className="text-white">{mockupOptions.count}</span></span>
+                              <div className="flex gap-1">
+                                  {[1, 2, 3].map(n => (
+                                      <button 
+                                        key={n}
+                                        onClick={() => setMockupOptions(prev => ({...prev, count: n}))}
+                                        className={`w-6 h-6 text-xs rounded border ${mockupOptions.count === n ? 'bg-white text-black border-white' : 'bg-zinc-900 text-zinc-500 border-zinc-700'}`}
+                                      >
+                                          {n}
+                                      </button>
+                                  ))}
+                              </div>
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                              <span className="text-xs text-zinc-400">Creativity</span>
+                              <div className="flex bg-zinc-900 rounded-lg p-1 border border-zinc-800">
+                                  <button 
+                                    onClick={() => setMockupOptions(prev => ({...prev, creativity: 'standard'}))}
+                                    className={`px-3 py-1 text-xs rounded ${mockupOptions.creativity === 'standard' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
+                                  >
+                                      Standard
+                                  </button>
+                                  <button 
+                                    onClick={() => setMockupOptions(prev => ({...prev, creativity: 'high'}))}
+                                    className={`px-3 py-1 text-xs rounded ${mockupOptions.creativity === 'high' ? 'bg-zinc-700 text-white' : 'text-zinc-500'}`}
+                                  >
+                                      High
+                                  </button>
+                              </div>
+                          </div>
+
+                          <div className="flex items-center justify-between">
+                              <span className="text-xs text-zinc-400">Vary Angles</span>
+                              <button 
+                                onClick={() => setMockupOptions(prev => ({...prev, varyAngles: !prev.varyAngles}))}
+                                className={`w-10 h-5 rounded-full relative transition-colors ${mockupOptions.varyAngles ? 'bg-white' : 'bg-zinc-800'}`}
+                              >
+                                  <div className={`absolute top-1 w-3 h-3 rounded-full bg-black transition-all ${mockupOptions.varyAngles ? 'left-6' : 'left-1'}`}></div>
+                              </button>
+                          </div>
+                      </div>
+                   </div>
+
                    <div>
-                      <h3 className="text-sm font-bold text-zinc-300 uppercase tracking-wider mb-4 font-mono">3. Instructions</h3>
+                      <h3 className="text-sm font-bold text-zinc-300 uppercase tracking-wider mb-4 font-mono mt-4">4. Instructions</h3>
                       <textarea 
                          className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-3 text-base text-white focus:ring-1 focus:ring-white focus:outline-none resize-none h-24 placeholder:text-zinc-700 font-mono text-sm"
                          placeholder="E.g. Embed the logos into the fabric texture..."
@@ -969,7 +1044,7 @@ export default function App() {
                       className="mt-auto"
                       icon={<Wand2 size={18} />}
                    >
-                      Generate Mockup
+                      {mockupOptions.count > 1 ? `Generate ${mockupOptions.count} Mockups` : 'Generate Mockup'}
                    </Button>
                 </div>
 
@@ -1228,7 +1303,7 @@ export default function App() {
                      <div className="space-y-3 text-sm">
                         <div className="flex justify-between py-2 border-b border-zinc-800/50">
                            <span className="text-zinc-500">Version</span>
-                           <span className="text-zinc-300 font-mono">1.2.0-beta</span>
+                           <span className="text-zinc-300 font-mono">1.3.0-beta</span>
                         </div>
                         <div className="flex justify-between py-2 border-b border-zinc-800/50">
                            <span className="text-zinc-500">Environment</span>

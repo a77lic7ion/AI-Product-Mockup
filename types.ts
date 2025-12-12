@@ -35,3 +35,9 @@ export interface LoadingState {
   isGenerating: boolean;
   message: string;
 }
+
+export interface MockupOptions {
+  count: number;
+  creativity: 'standard' | 'high';
+  varyAngles: boolean;
+}
